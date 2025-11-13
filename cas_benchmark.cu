@@ -8,9 +8,6 @@ __device__ int lock_var = 0;
 
 __device__ int counter  = 0;
 
-__device__ volatile float sink = 0.0f; // 防止临界区计算被优化掉
-
-
 
 #ifdef USE_BACKOFF
 
@@ -22,13 +19,13 @@ __device__ void acquire_lock(int *lock) {
 
         unsigned long long start = clock64();
 
-        while (clock64() - start < delay);   // 忙等 delay 个周期
+        while (clock64() - start < delay);   // Busy waiting delay
 
-        delay = min(delay * 2, 1024u);       // 指数退避上限
+        delay = min(delay * 2, 1024u);       // Exponential Backoff
 
     }
-
-    // 根据需要可在此处加 __threadfence();
+`
+    // Maybe: __threadfence();
 
 }
 
@@ -41,7 +38,7 @@ __device__ void acquire_lock(int *lock) {
 
     }
 
-    // 进入临界区前通常不需要 fence（根据你的语义而定）
+    // Maybe: fence（根据你的语义而定）
 
 }
 
@@ -51,7 +48,7 @@ __device__ void acquire_lock(int *lock) {
 
 __device__ void release_lock(int *lock) {
 
-    __threadfence();              // 确保临界区写对其他线程可见
+    __threadfence();              // Make sure each thread had updated memory
 
     atomicExch(lock, 0);
 
@@ -59,36 +56,24 @@ __device__ void release_lock(int *lock) {
 
 
 
-// 竞争锁：计数 + 可调“假工作”拉长临界区
-
-__global__ void kernel_with_backoff(int iters, int work) {
+__global__ void kernel_operations(int iters, float *sink_array, int sink_size) {
 
     for (int i = 0; i < iters; i++) {
 
         acquire_lock_backoff(&lock_var);
 
-
-
-        // ---- 临界区开始 ----
-
-        counter++;  // 共享计数
+        counter++;
 
         float x = threadIdx.x + blockIdx.x * 1.0f;
 
+
+        sink_array[0] += 1;
         #pragma unroll 1
 
-        for (int k = 0; k < work; ++k) {
-
-            x = x * 1.000001f + 0.999999f;   // 简单计算，制造占用
-
+        for (int k = 1; k < sink_size; ++k) {
+            sink_array[k] = sink_array[k-1];
         }
-
-        sink = x + counter;                  // 防优化
-
-        // ---- 临界区结束 ----
-
-
-
+        
         release_lock(&lock_var);
 
     }
@@ -103,9 +88,10 @@ int main(int argc, char **argv) {
 
     int iters  = 1;        // 每线程进入临界区次数
 
-    int work = atoi(argv[1]);    // 临界区“假工作”量，越大越长
+    const int sink_size = 1024 * 1024;
 
-
+    float *d_sink;
+    cudaMalloc(&d_sink, sink_size * sizeof(float));
 
     cudaEvent_t start, stop;
 
@@ -117,7 +103,7 @@ int main(int argc, char **argv) {
 
     cudaEventRecord(start);
 
-    kernel_with_backoff<<<blocks, threads>>>(iters, work);
+    kernel_operations<<<blocks, threads>>>(iters, d_sink, sink_size);
 
     cudaEventRecord(stop);
 
