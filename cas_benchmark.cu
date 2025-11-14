@@ -32,7 +32,6 @@ __global__ void kernel_operations(int iters, float *sink_array, int sink_size) {
         
         // ---- Critical section ----
         counter++;
-        float x = threadIdx.x + blockIdx.x * 1.0f;
         
         sink_array[0] += 1;
         #pragma unroll 1
