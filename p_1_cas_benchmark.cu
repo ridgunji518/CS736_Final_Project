@@ -27,22 +27,20 @@ __device__ void release_lock(int *lock) {
 }
 
 __global__ void kernel_operations(int iters, float *sink_array, int sink_size) {
-    if(threadIdx.x==0){
-        for (int i = 0; i < iters; i++) {
-            acquire_lock(&lock_var);
-            
-            // ---- Critical section ----
-            counter++;
-            
-            sink_array[0] += 1;
-            #pragma unroll 1
-            for (int k = 1; k < sink_size; ++k) {
-                sink_array[k] = sink_array[k-1];
-            }
-            // ---- End critical section ----
-            
-            release_lock(&lock_var);
+    for (int i = 0; i < iters; i++) {
+        acquire_lock(&lock_var);
+        
+        // ---- Critical section ----
+        counter++;
+        
+        sink_array[0] += 1;
+        #pragma unroll 1
+        for (int k = 1; k < sink_size; ++k) {
+            sink_array[k] = sink_array[k-1];
         }
+        // ---- End critical section ----
+        
+        release_lock(&lock_var);
     }
 }
 
