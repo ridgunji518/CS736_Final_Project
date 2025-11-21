@@ -27,20 +27,22 @@ __device__ void release_lock(int *lock) {
 }
 
 __global__ void kernel_operations(int iters, float *sink_array, int sink_size) {
-    for (int i = 0; i < iters; i++) {
-        acquire_lock(&lock_var);
-        
-        // ---- Critical section ----
-        counter++;
-        
-        sink_array[0] += 1;
-        #pragma unroll 1
-        for (int k = 1; k < sink_size; ++k) {
-            sink_array[k] = sink_array[k-1];
+    if(threadIdx.x == 0) {  // Only thread 0 in each block competes for lock
+        for (int i = 0; i < iters; i++) {
+            acquire_lock(&lock_var);
+            
+            // ---- Critical section ----
+            counter++;
+            
+            sink_array[0] += 1;
+            #pragma unroll 1
+            for (int k = 1; k < sink_size; ++k) {
+                sink_array[k] = sink_array[k-1];
+            }
+            // ---- End critical section ----
+            
+            release_lock(&lock_var);
         }
-        // ---- End critical section ----
-        
-        release_lock(&lock_var);
     }
 }
 
@@ -52,7 +54,8 @@ void reset_globals() {
 
 int main(int argc, char **argv) {
     int sink_size = (argc > 1) ? atoi(argv[1]) : 1024;  // Array size for critical section
-    int iters = 1;  // Iterations per thread
+    int num_runs = (argc > 2) ? atoi(argv[2]) : 1000;   // Number of iterations to average
+    int iters = 1;  // Iterations per thread in kernel
     
     // Allocate and initialize the sink array
     float *d_sink_array;
@@ -73,8 +76,9 @@ int main(int argc, char **argv) {
 #else
     printf("=== Lock Contention Benchmark (NO BACKOFF) ===\n");
 #endif
-    printf("Array size: %d elements (%.2f KB)\n\n", sink_size, sink_size * sizeof(float) / 1024.0f);
-    printf("Blocks,Threads,Total_Threads,Time_ms,Counter,Expected,Correct\n");
+    printf("Array size: %d elements (%.2f KB)\n", sink_size, sink_size * sizeof(float) / 1024.0f);
+    printf("Runs per configuration: %d\n\n", num_runs);
+    printf("Blocks,Threads,Total_Threads,Avg_Time_ms,Min_Time_ms,Max_Time_ms,StdDev_ms,Counter,Expected,Correct\n");
 
     for (int b = 0; b < num_blocks; b++) {
         for (int t = 0; t < num_threads; t++) {
@@ -82,33 +86,54 @@ int main(int argc, char **argv) {
             int threads = thread_sizes[t];
             int total_threads = blocks * threads;
             
-            // Reset device globals before each run
-            reset_globals();
-            cudaMemset(d_sink_array, 0, sink_size * sizeof(float));
+            float sum_time = 0.0f;
+            float sum_sq_time = 0.0f;
+            float min_time = 1e10f;
+            float max_time = 0.0f;
+            int final_counter = 0;
             
-            cudaEventRecord(start);
-            kernel_operations<<<blocks, threads>>>(iters, d_sink_array, sink_size);
-            cudaEventRecord(stop);
-            cudaEventSynchronize(stop);
+            // Run multiple times for this configuration
+            for (int run = 0; run < num_runs; run++) {
+                // Reset device globals before each run
+                reset_globals();
+                cudaMemset(d_sink_array, 0, sink_size * sizeof(float));
+                
+                cudaEventRecord(start);
+                kernel_operations<<<blocks, threads>>>(iters, d_sink_array, sink_size);
+                cudaEventRecord(stop);
+                cudaEventSynchronize(stop);
 
-            // Check for kernel errors
-            cudaError_t err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("Kernel error: %s\n", cudaGetErrorString(err));
-                continue;
+                // Check for kernel errors
+                cudaError_t err = cudaGetLastError();
+                if (err != cudaSuccess) {
+                    printf("Kernel error: %s\n", cudaGetErrorString(err));
+                    break;
+                }
+
+                float ms = 0.0f;
+                cudaEventElapsedTime(&ms, start, stop);
+                
+                sum_time += ms;
+                sum_sq_time += ms * ms;
+                min_time = (ms < min_time) ? ms : min_time;
+                max_time = (ms > max_time) ? ms : max_time;
+                
+                // Only check counter on last run
+                if (run == num_runs - 1) {
+                    cudaMemcpyFromSymbol(&final_counter, counter, sizeof(int));
+                }
             }
-
-            float ms = 0.0f;
-            cudaEventElapsedTime(&ms, start, stop);
-
-            int result = 0;
-            cudaMemcpyFromSymbol(&result, counter, sizeof(int));
             
-            int expected = total_threads * iters;
-            const char* correct = (result == expected) ? "YES" : "NO";
+            float avg_time = sum_time / num_runs;
+            float variance = (sum_sq_time / num_runs) - (avg_time * avg_time);
+            float stddev = sqrtf(variance > 0 ? variance : 0);
             
-            printf("%d,%d,%d,%.3f,%d,%d,%s\n",
-                   blocks, threads, total_threads, ms, result, expected, correct);
+            int expected = blocks * iters;  // Only 1 thread per block competes
+            const char* correct = (final_counter == expected) ? "YES" : "NO";
+            
+            printf("%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%s\n",
+                   blocks, threads, total_threads, avg_time, min_time, max_time, stddev,
+                   final_counter, expected, correct);
         }
     }
 
