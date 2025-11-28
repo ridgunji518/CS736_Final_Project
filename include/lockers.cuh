@@ -72,15 +72,24 @@ __device__ __forceinline__ void mutex_unlock(int* mutex) {
     __threadfence(); 
     atomicExch(mutex, 0);
 }
-
-__device__ __forceinline__ void acquire_lock(int* mutex) {
-#ifdef USE_NO_BACKOFF
-    acquire_lock_spin(mutex);
-#elif defined(USE_EXP_BACKOFF)
-    acquire_lock_exponential(mutex);
-#else 
+__device__ __forceinline__ int get_local_pressure() {
+    //__activemask() returns a 32-bit mask representing active threads in the warp
+    unsigned int mask = __activemask();
     
-    acquire_lock_adaptive(mutex);
+    int active_threads = __popc(mask);
+    
+    return active_threads; 
+}
+__device__ __forceinline__ void acquire_lock(int* mutex) {
+
+#if defined(USE_BACKOFF)
+    if(get_local_pressure() <= 16) {
+        acquire_lock_spin(mutex);
+    } else {
+        acquire_lock_adaptive(mutex);
+    }
+#else
+    acquire_lock_spin(mutex);
 #endif
 }
 
