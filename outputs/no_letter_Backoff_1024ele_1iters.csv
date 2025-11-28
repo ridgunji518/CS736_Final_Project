@@ -1,0 +1,4 @@
+=== Letter Histogram Benchmark (NO BACKOFF) ===
+Text length: 1048576 chars, Chunk per thread: 256
+Blocks,Threads,Total_Tasks,Avg_Time_ms,Throughput(GB/s),Correct
+512,256,131072,0.908,0.58,NO
