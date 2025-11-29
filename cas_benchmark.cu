@@ -26,23 +26,38 @@ __device__ void release_lock(int *lock) {
     atomicExch(lock, 0);
 }
 
-__global__ void kernel_operations(int iters, float *sink_array, int sink_size) {
-    if(threadIdx.x == 0) {  // Only thread 0 in each block competes for lock
-        for (int i = 0; i < iters; i++) {
-            acquire_lock(&lock_var);
-            
-            // ---- Critical section ----
-            counter++;
-            
-            sink_array[0] += 1;
-            #pragma unroll 1
-            for (int k = 1; k < sink_size; ++k) {
-                sink_array[k] = sink_array[k-1];
-            }
-            // ---- End critical section ----
-            
-            release_lock(&lock_var);
-        }
+__global__ void kernel_operations(float *sink_array, int sink_size, unsigned long long *block_times) {
+
+    __shared__ unsigned long long start_clock;
+    __shared__ unsigned long long end_clock;
+
+    int threadsInBlock = blockDim.x;
+    int length = sink_size / threadsInBlock;
+    int startIndex = length * threadIdx.x;
+    int finalIndex = length + startIndex;
+
+
+    if(threadIdx.x == 0) {
+        start_clock = clock64();
+        acquire_lock(&lock_var);
+    }
+
+    __syncthreads();
+    // ---- Critical section ----
+    sink_array[startIndex] += 1;
+    for (int k = startIndex + 1; k < finalIndex; ++k) {
+        sink_array[k] = sink_array[k-1];
+    }
+    // ---- End critical section ----
+    __syncthreads();
+
+    if(threadIdx.x == 0) {
+        release_lock(&lock_var);
+        end_clock = clock64();
+    }
+
+    if (threadIdx.x == 0) {
+        clock_times[blockIdx.x] = end_clock - start_clock;
     }
 }
 
@@ -52,14 +67,27 @@ void reset_globals() {
     cudaMemcpyToSymbol(counter, &zero, sizeof(int));
 }
 
+int is_power_of_2(int x) {
+    return x > 0 && (x & (x - 1)) == 0;
+}
+
 int main(int argc, char **argv) {
     int sink_size = (argc > 1) ? atoi(argv[1]) : 1024;  // Array size for critical section
+
     int num_runs = (argc > 2) ? atoi(argv[2]) : 1000;   // Number of iterations to average
-    int iters = 1;  // Iterations per thread in kernel
+
+    if(sink_size % 256 != 0) {
+        printf("Sink Size must be divisible by 256\n");
+        return -1;
+    }
     
     // Allocate and initialize the sink array
     float *d_sink_array;
     cudaMalloc(&d_sink_array, sink_size * sizeof(float));
+
+    // Allocate and initialize the block times array
+    unsigned long long *d_block_times;
+    cudaMalloc(&d_block_times, numBlocks * sizeof(unsigned long long));
     
     int block_sizes[] = {1, 2, 4, 8, 16, 32};
     int thread_sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
@@ -76,6 +104,7 @@ int main(int argc, char **argv) {
 #else
     printf("=== Lock Contention Benchmark (NO BACKOFF) ===\n");
 #endif
+
     printf("Array size: %d elements (%.2f KB)\n", sink_size, sink_size * sizeof(float) / 1024.0f);
     printf("Runs per configuration: %d\n\n", num_runs);
     printf("Blocks,Threads,Total_Threads,Avg_Time_ms,Min_Time_ms,Max_Time_ms,StdDev_ms,Counter,Expected,Correct\n");
@@ -99,7 +128,7 @@ int main(int argc, char **argv) {
                 cudaMemset(d_sink_array, 0, sink_size * sizeof(float));
                 
                 cudaEventRecord(start);
-                kernel_operations<<<blocks, threads>>>(iters, d_sink_array, sink_size);
+                kernel_operations<<<blocks, threads>>>(d_sink_array, sink_size);
                 cudaEventRecord(stop);
                 cudaEventSynchronize(stop);
 
