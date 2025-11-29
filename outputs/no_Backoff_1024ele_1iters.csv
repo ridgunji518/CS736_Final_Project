@@ -1,0 +1,6 @@
+=== Lock Contention Benchmark (NO BACKOFF) ===
+Array size: 1024 elements (4.00 KB)
+Runs per configuration: 1
+
+Blocks,Threads,Total_Threads,Avg_Time_ms,Min_Time_ms,Max_Time_ms,StdDev_ms,Counter,Expected,Correct
+512,256,131072,7.373824,7.373824,7.373824,0.000000,512,512,YES
