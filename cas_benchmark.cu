@@ -82,7 +82,7 @@ __device__ void release_lock(int *lock) {
 struct BlockTiming {
     unsigned long long acquire_time;
     unsigned long long block_time;
-}
+};
 
 __global__ void kernel_operations(float *sink_array, int sink_size, struct BlockTiming *block_times) {
 
@@ -219,7 +219,7 @@ int main(int argc, char **argv) {
             float variance = (sum_sq_time / num_runs) - (avg_time * avg_time);
             float stddev = sqrtf(variance > 0 ? variance : 0);
             
-            int expected = blocks * iters;  // Only 1 thread per block competes
+            int expected = blocks * num_runs;  // Only 1 thread per block competes
             const char* correct = (final_counter == expected) ? "YES" : "NO";
 
             // print times it took for each block
