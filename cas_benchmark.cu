@@ -222,21 +222,25 @@ int main(int argc, char **argv) {
             int expected = blocks * iters;  // Only 1 thread per block competes
             const char* correct = (final_counter == expected) ? "YES" : "NO";
 
-            double averageBlockTimes = 0;
-            for (int i = 0; i < ; i++) {
-                averageBlockTimes += h_block_times;
-                printf("Block %d time: %llu cycles\n", i, h_block_times[i]);
-            }
-            
-            printf("%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%s\n",
-                   blocks, threads, total_threads, avg_time, min_time, max_time, stddev,
-                   final_counter, expected, correct);
-
             // print times it took for each block
             struct BlockTiming h_block_times[maxNumBlocks];
             cudaMemcpy(h_block_times, d_block_times,
                     blocks * sizeof(struct BlockTiming),
                     cudaMemcpyDeviceToHost);
+
+            double averageAcquireTime = 0;
+            double averageBlockTime = 0;
+            for (int i = 0; i < blocks; i++) {
+                averageAcquireTime += h_block_times[i].acquire_time;
+                averageBlockTime += h_block_times[i].block_time;
+            }
+
+            averageAcquireTime /= blocks;
+            averageBlockTime /= blocks;
+            
+            printf("%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%s,%0.6f,%0.6f\n",
+                   blocks, threads, total_threads, avg_time, min_time, max_time, stddev,
+                   final_counter, expected, correct, averageAcquireTime, averageBlockTime);
 
 
         }
