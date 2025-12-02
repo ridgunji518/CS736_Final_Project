@@ -79,9 +79,15 @@ __device__ void release_lock(int *lock) {
     atomicExch(lock, 0);
 }
 
-__global__ void kernel_operations(float *sink_array, int sink_size, unsigned long long *block_times) {
+struct BlockTiming {
+    unsigned long long acquire_time;
+    unsigned long long block_time;
+}
+
+__global__ void kernel_operations(float *sink_array, int sink_size, struct BlockTiming *block_times) {
 
     __shared__ unsigned long long start_clock;
+    __shared__ unsigned long long acquire_clock;
     __shared__ unsigned long long end_clock;
 
     int threadsInBlock = blockDim.x;
@@ -93,6 +99,7 @@ __global__ void kernel_operations(float *sink_array, int sink_size, unsigned lon
     if(threadIdx.x == 0) {
         start_clock = clock64();
         acquire_lock(&lock_var);
+        acquire_clock = clock64();
     }
 
     __syncthreads();
@@ -110,7 +117,8 @@ __global__ void kernel_operations(float *sink_array, int sink_size, unsigned lon
     }
 
     if (threadIdx.x == 0) {
-        clock_times[blockIdx.x] = end_clock - start_clock;
+        block_times[blockIdx.x].acquire_time = acquire_clock - start_clock;
+        block_times[blockIdx.x].block_time = end_clock - acquire_clock;
     }
 }
 
@@ -139,9 +147,9 @@ int main(int argc, char **argv) {
     cudaMalloc(&d_sink_array, sink_size * sizeof(float));
 
     // Allocate and initialize the block times array
-    unsigned long long *d_block_times;
+    struct BlockTiming *d_block_times;
     constexpr int maxNumBlocks = 512;
-    cudaMalloc(&d_block_times, maxNumBlocks * sizeof(unsigned long long));
+    cudaMalloc(&d_block_times, maxNumBlocks * sizeof(struct BlockTiming));
     
     int block_sizes[] = {512};
     int thread_sizes[] = {256};
@@ -182,7 +190,7 @@ int main(int argc, char **argv) {
                 cudaMemset(d_sink_array, 0, sink_size * sizeof(float));
                 
                 cudaEventRecord(start);
-                kernel_operations<<<blocks, threads>>>(d_sink_array, sink_size);
+                kernel_operations<<<blocks, threads>>>(d_sink_array, sink_size, d_block_times);
                 cudaEventRecord(stop);
                 cudaEventSynchronize(stop);
 
@@ -213,20 +221,23 @@ int main(int argc, char **argv) {
             
             int expected = blocks * iters;  // Only 1 thread per block competes
             const char* correct = (final_counter == expected) ? "YES" : "NO";
+
+            double averageBlockTimes = 0;
+            for (int i = 0; i < ; i++) {
+                averageBlockTimes += h_block_times;
+                printf("Block %d time: %llu cycles\n", i, h_block_times[i]);
+            }
             
             printf("%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%s\n",
                    blocks, threads, total_threads, avg_time, min_time, max_time, stddev,
                    final_counter, expected, correct);
 
             // print times it took for each block
-            unsigned long long h_block_times[maxNumBlocks];
+            struct BlockTiming h_block_times[maxNumBlocks];
             cudaMemcpy(h_block_times, d_block_times,
-                    blocks * sizeof(unsigned long long),
+                    blocks * sizeof(struct BlockTiming),
                     cudaMemcpyDeviceToHost);
 
-            for (int i = 0; i < numBlocks; i++) {
-                printf("Block %d time: %llu cycles\n", i, h_block_times[i]);
-            }
 
         }
     }
