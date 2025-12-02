@@ -140,7 +140,8 @@ int main(int argc, char **argv) {
 
     // Allocate and initialize the block times array
     unsigned long long *d_block_times;
-    cudaMalloc(&d_block_times, numBlocks * sizeof(unsigned long long));
+    constexpr int maxNumBlocks = 512;
+    cudaMalloc(&d_block_times, maxNumBlocks * sizeof(unsigned long long));
     
     int block_sizes[] = {512};
     int thread_sizes[] = {256};
@@ -216,11 +217,23 @@ int main(int argc, char **argv) {
             printf("%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%d,%d,%s\n",
                    blocks, threads, total_threads, avg_time, min_time, max_time, stddev,
                    final_counter, expected, correct);
+
+            // print times it took for each block
+            unsigned long long h_block_times[maxNumBlocks];
+            cudaMemcpy(h_block_times, d_block_times,
+                    blocks * sizeof(unsigned long long),
+                    cudaMemcpyDeviceToHost);
+
+            for (int i = 0; i < numBlocks; i++) {
+                printf("Block %d time: %llu cycles\n", i, h_block_times[i]);
+            }
+
         }
     }
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
     cudaFree(d_sink_array);
+    cudaFree(d_block_times);
     return 0;
 }
