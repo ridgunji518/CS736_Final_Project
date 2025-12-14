@@ -1,15 +1,20 @@
 #ifndef LOCKERS_CUH
 #define LOCKERS_CUH
 #include <cuda_runtime.h>
-
+__device__ __forceinline__ unsigned int fast_hash(unsigned int x) {
+    x ^= x >> 13;
+    x *= 0x5bd1e995;
+    x ^= x >> 15;
+    return x;
+}
 __device__ __forceinline__ unsigned int get_random_delay(unsigned int attempt, int tid){
+    const unsigned int MAX_SHIFT = 5; 
+    unsigned int shift = (attempt < MAX_SHIFT) ? attempt : MAX_SHIFT;
+    unsigned int limit = 32u << shift;
     unsigned long long time = clock64();
-    unsigned int seed = (unsigned int)time ^ tid;
-    unsigned int cap = 1024;
-    unsigned int limit = 32 * (1 << (attempt < 10 ? attempt : 10));
-    if (limit > cap) limit = cap;
-    
-    return (seed % limit) + 1;
+    unsigned int seed = (unsigned int)time ^ tid ^ attempt;
+    unsigned int random_val = fast_hash(seed);
+    return (random_val & (limit - 1)) + 1;
 }
 
 __device__ __forceinline__ void acquire_lock_spin(int *lock) {
@@ -18,24 +23,44 @@ __device__ __forceinline__ void acquire_lock_spin(int *lock) {
     }
 }
 
-__device__ __forceinline__ void acquire_lock_exponential(int *lock) {
+__device__ __forceinline__ void acquire_lock_binary_exponential(int *lock) {
     unsigned delay = 2;
     while (atomicCAS(lock, 0, 1) != 0) {
-        unsigned long long start = clock64();
-        while (clock64() - start < delay);   // Busy waiting delay
-        delay = min(delay * 2, 1024u);       // Exponential Backoff
+        __nanosleep(min(delay*2, 1024u));       // Exponential Backoff
     }
 }
 
+__device__ __forceinline__ void acquire_lock_random_backoff(int *lock) {
+    int attempt = 0;
+    while (atomicCAS(lock, 0, 1) != 0) {
+        attempt++;
+        unsigned int ns = get_random_delay(attempt, threadIdx.x + blockIdx.x * blockDim.x);
+        __nanosleep(ns);
+    }
+}
+__device__ __forceinline__ void acquire_lock_linear_backoff(int *lock) {
+    unsigned delay = 1;
+    while (atomicCAS(lock, 0, 1) != 0) {
+        __nanosleep(min(delay + 2, 1024u));       // Linear Backoff
+    }
+}
+__device__ __forceinline__ void acquire_lock_uninform_backoff(int *lock) {
+    while (atomicCAS(lock, 0, 1) != 0) {
+        unsigned int ns = get_random_delay(0, threadIdx.x + blockIdx.x * blockDim.x);
+        __nanosleep(ns);
+    }
+}
 __device__ __forceinline__ void acquire_lock_adaptive(int* mutex) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     int attempt = 0;
 
+    // set a limit for leader spinning
+    // the leader will spin for a certain number of iterations before giving up
+    const int LEADER_SPIN_LIMIT = 100; 
+
     while (true) {
         // --- policy 1: Warp aggregation ---
-        // check in the current warp which thread will attempt to acquire the lock
         unsigned int mask = __activemask();
-        // select the thread with the smallest ID as the leader
         int leader = __ffs(mask) - 1; 
         int lane_id = threadIdx.x % 32;
 
@@ -43,26 +68,37 @@ __device__ __forceinline__ void acquire_lock_adaptive(int* mutex) {
         int lock_result = 0;
 
         if (is_leader) {
-            // --- policy 2: TTAS (Test-and-Test-and-Set) ---
-            // Only attempt atomic operation if it appears to be 0
-            // The volatile here forces a read from memory each time
+            // --- policy 2: Enhanced TTAS (Spin-Then-Try) ---
+            
+            // stage A: self-spin
+            // Leader will spin for a short time before attempting to acquire the lock
+            int spin_count = 0;
+            while (*(volatile int*)mutex != 0 && spin_count < LEADER_SPIN_LIMIT) {
+                spin_count++;
+                // can insert a small delay here if needed
+                // __nanosleep(1); // 可选
+            }
+
+            // stage B: try to acquire
+            // only initiate atomic operation if it looks like 0
             if (*(volatile int*)mutex == 0) {
                 lock_result = atomicCAS(mutex, 0, 1);
             } else {
-                lock_result = 1; // Looks locked, treat as failure
+                lock_result = 1; // set to failure if still locked
             }
         }
 
-        // Leader broadcasts the result to all threads in the Warp
+        // Leader 广播结果
+        // 注意：Leader 在上面自旋的时候，Warp 里其他线程都在这里等 Leader (SIMT 特性)
         lock_result = __shfl_sync(mask, lock_result, leader);
 
-        // If atomicCAS returns 0, the lock was acquired successfully
+        // 成功获取
         if (lock_result == 0) {
-            return; // Success, exit loop
+            return; 
         }
 
-        // --- policy 3: Adaptive backoff ---
-        // Only execute on failure, with added randomness
+        // --- policy 3: Adaptive/Exponential Backoff ---
+        // 只有当 Leader 自旋 + 抢锁都失败了，整个 Warp 才去休眠
         unsigned int ns = get_random_delay(attempt++, tid);
         __nanosleep(ns);
     }
@@ -83,11 +119,17 @@ __device__ __forceinline__ int get_local_pressure() {
 __device__ __forceinline__ void acquire_lock(int* mutex) {
 
 #if defined(USE_BACKOFF)
-    if(get_local_pressure() <= 16) {
+    if(get_local_pressure() <= 8) {
         acquire_lock_spin(mutex);
     } else {
         acquire_lock_adaptive(mutex);
     }
+#elif defined(BIN_EXP_BACKOFF)
+    acquire_lock_binary_exponential(mutex);
+#elif defined(LINEAR_BACKOFF)
+    acquire_lock_linear_backoff(mutex);
+#elif defined(UNIFORM_BACKOFF)
+    acquire_lock_uninform_backoff(mutex);
 #else
     acquire_lock_spin(mutex);
 #endif
